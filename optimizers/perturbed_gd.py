@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from torch.optim.optimizer import Optimizer
 from copy import deepcopy
+from functools import reduce
 
 
 class PerturbedGD(Optimizer):
@@ -21,49 +22,72 @@ class PerturbedGD(Optimizer):
                         d=d)
         super().__init__(params, defaults)
 
+        self._is_done = False
+        self.n_iter = 0
+        self._params = self.param_groups[0]['params']
+        self._numel_cache = None
+        self.t_noise = - t_thresh - 1
+        self.curr_x_tilde = None
+
+    def _gather_flat_grad(self):
+        views = [p.grad.view(-1) for p in self._params]
+        return torch.cat(views, 0)
+
+    def _numel(self):
+        if self._numel_cache is None:
+            self._numel_cache = reduce(lambda total, p: total + p.numel(), self._params, 0)
+        return self._numel_cache
+
+    def _add_grad(self, step_size, update):
+        offset = 0
+        for p in self._params:
+            numel = p.numel()
+            # view as to avoid deprecated pointwise semantics
+            p.data.add_(step_size, update[offset:offset + numel].view_as(p.data))
+            offset += numel
+        assert offset == self._numel()
+
+    def _update_grad(self, const, tensor):
+        offset = 0
+        for p in self._params:
+            numel = p.numel()
+            # view as to avoid deprecated pointwise semantics
+            p.data.zero_()
+            p.data.add_(tensor[offset:offset + numel].view_as(p.data))
+            p.data.add_(const)
+            offset += numel
+        assert offset == self._numel()
+
     def step(self, closure=None):
         loss = None
         if closure is not None:
             loss = closure()
 
-        for group in self.param_groups:
-            chi = group['chi']
-            eta = group['eta']
-            r = group['r']
-            g_thresh = group['g_thresh']
-            f_thresh = group['f_thresh']
-            t_thresh = group['t_thresh']
-            d = group['d']
+        assert len(self.param_groups) == 1
+        group = self.param_groups[0]
 
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-                d_p = p.grad.data
+        chi = group['chi']
+        eta = group['eta']
+        r = group['r']
+        g_thresh = group['g_thresh']
+        f_thresh = group['f_thresh']
+        t_thresh = group['t_thresh']
+        d = group['d']
 
-                param_state = self.state[p]
-                if 't_noise' not in param_state:
-                    param_state['t_noise'] = deepcopy(-t_thresh - 1)
-                if 'T' not in param_state:
-                    param_state['T'] = torch.tensor(0)
 
-                t_noise = param_state['t_noise']
-                T = param_state['T']
+        flat_grad = self._gather_flat_grad()
 
-                if torch.le(d_p, g_thresh).all() and T - t_noise > t_thresh:
-                    print("Adding noise")
-                    if 'curr_x_tilde' not in param_state:
-                        param_state['curr_x_tilde'] = torch.tensor(0)
-                    curr_x_tilde = param_state['curr_x_tilde']
-                    curr_x_tilde.data = deepcopy(p.data)
-                    t_noise = deepcopy(T)
+        if torch.norm(flat_grad, p=2) <= g_thresh and self.n_iter - self.t_noise > t_thresh:
+            self.curr_x_tilde = flat_grad
+            self.t_noise = self.n_iter
 
-                    y = np.random.multivariate_normal(np.zeros(d), np.identity(d))
-                    y_norm = y/np.linalg.norm(y, ord=2)
-                    u = np.random.uniform(0, r)
-                    xi = u**(1./d)*y_norm
-
-                    p.data = curr_x_tilde + xi
-                p.data.add_(-eta, d_p)
-                T.add_(1)
+            # y = np.random.multivariate_normal(np.zeros(d), np.identity(d))
+            xi = torch.tensor(np.random.normal(loc=0,scale=1, size=len(flat_grad))).float()
+            xi.div_(torch.norm(xi, p=2))
+            u = np.random.uniform(0, r)
+            xi.mul_(u**(1./d))
+            self._update_grad(xi, self.curr_x_tilde)
+        self._add_grad(-eta, flat_grad)
+        self.n_iter += 1
 
         return loss
