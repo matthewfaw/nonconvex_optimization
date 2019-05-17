@@ -3,6 +3,8 @@ import torch
 from torch.optim.optimizer import Optimizer
 from copy import deepcopy
 from functools import reduce
+import pprint
+pp = pprint.PrettyPrinter(indent=4)
 
 
 # Adapted from: https://pytorch.org/docs/stable/_modules/torch/optim/lbfgs.html
@@ -21,6 +23,8 @@ class StochasticCubicRegularizedNewton(Optimizer):
                         epsilon=epsilon,
                         T_eps=T_eps,
                         c_prime=c_prime)
+        print("Defaults:")
+        pp.pprint(defaults)
         super().__init__(params, defaults)
         if len(self.param_groups) != 1:
             raise ValueError("SCRN doesn't support per-parameter options "
